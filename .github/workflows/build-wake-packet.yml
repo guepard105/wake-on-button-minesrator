@@ -1,0 +1,61 @@
+name: Build wake packet
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_mac:
+        description: "Adresse MAC du serveur cible (aa:bb:cc:dd:ee:ff)"
+        required: true
+        type: string
+      password:
+        description: "Mot de passe SecureOn optionnel (4 ou 6 octets hex)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wake-packet
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build wake-packet module
+        run: ./gradlew --no-daemon :wake-packet:shadowJar
+
+      - name: Generate magic packet
+        env:
+          TARGET_MAC: ${{ inputs.target_mac }}
+          WOL_PASSWORD: ${{ inputs.password }}
+        run: |
+          set -euo pipefail
+          JAR=$(ls wake-packet/build/libs/*-all.jar | head -n1)
+          test -n "$JAR"
+          ARGS=(--mac="$TARGET_MAC")
+          if [ -n "${WOL_PASSWORD:-}" ]; then
+            ARGS+=(--password="$WOL_PASSWORD")
+          fi
+          java -jar "$JAR" "${ARGS[@]}" --output-base64 > packet.b64
+          test -s packet.b64
+
+      - name: Upload packet artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wake-packet
+          path: packet.b64
+          retention-days: 1
+          if-no-files-found: error

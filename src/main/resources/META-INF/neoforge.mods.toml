@@ -1,0 +1,24 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+
+[[mods]]
+modId="wakeonbutton"
+version="2.0.0"
+displayName="MineStrator Wake-On-Button"
+description="Ajoute un bouton pour réveiller le serveur via GitHub Actions + WoL (tout dans le .jar)."
+authors="guepard103"
+
+[[dependencies.wakeonbutton]]
+modId="neoforge"
+type="required"
+versionRange="[21.1,)"
+ordering="NONE"
+side="CLIENT"
+
+[[dependencies.wakeonbutton]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1,1.22)"
+ordering="NONE"
+side="CLIENT"

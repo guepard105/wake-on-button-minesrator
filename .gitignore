@@ -1,0 +1,28 @@
+# --- Gradle ---
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# --- IDE ---
+.idea/
+*.iml
+.vscode/
+.run/
+.settings/
+.classpath
+.project
+
+# --- Sorties locales Minecraft / mod ---
+run/
+logs/
+crash-reports/
+wakeonbutton.log
+/config/
+
+# --- Artefacts locaux et packs (ne pas versionner, ~4 Go) ---
+/repo/
+/minecraft-instance/
+/MineStrator-modpack-*/
+/MineStrator-modpack-*.zip
+*.jar
+!gradle/wrapper/gradle-wrapper.jar

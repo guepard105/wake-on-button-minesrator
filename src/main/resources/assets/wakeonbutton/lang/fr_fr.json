@@ -1,0 +1,11 @@
+{
+  "wakeonbutton.gui.start_server": "Réveiller le serveur",
+  "wakeonbutton.gui.waking": "Réveil en cours...",
+  "wakeonbutton.toast.success_title": "WakeOnButton",
+  "wakeonbutton.toast.success": "Paquet de réveil envoyé !",
+  "wakeonbutton.toast.error_title": "WakeOnButton",
+  "wakeonbutton.toast.error": "Échec du réveil : %s",
+  "wakeonbutton.toast.config_missing": "Configuration incomplète : vérifiez config/wakeonbutton.json",
+  "wakeonbutton.toast.first_run_setup": "Première configuration nécessaire : config/wakeonbutton.json",
+  "wakeonbutton.toast.token_decrypt_failed": "Jeton GitHub absent ou indéchiffrable"
+}
