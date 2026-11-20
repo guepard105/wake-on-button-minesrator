@@ -6,7 +6,7 @@ license="MIT"
 modId="wakeonbutton"
 version="2.0.0"
 displayName="MineStrator Wake-On-Button"
-description="Ajoute un bouton pour réveiller le serveur via GitHub Actions + WoL (tout dans le .jar)."
+description="Ajoute un bouton pour allumer le serveur MineStrator (tout dans le .jar)."
 authors="guepard103"
 
 [[dependencies.wakeonbutton]]

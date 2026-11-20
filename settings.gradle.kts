@@ -8,6 +8,3 @@ pluginManagement {
 }
 
 rootProject.name = "wakeonbutton"
-
-// Sous-projet autonome (JDK pur) generant les paquets de reveil.
-include("wake-packet")

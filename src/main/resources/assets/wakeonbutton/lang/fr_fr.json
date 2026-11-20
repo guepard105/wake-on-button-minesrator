@@ -1,11 +1,13 @@
 {
-  "wakeonbutton.gui.start_server": "Réveiller le serveur",
-  "wakeonbutton.gui.waking": "Réveil en cours...",
+  "wakeonbutton.gui.start_server": "Allumer le serveur",
+  "wakeonbutton.gui.waking": "Démarrage...",
   "wakeonbutton.toast.success_title": "WakeOnButton",
-  "wakeonbutton.toast.success": "Paquet de réveil envoyé !",
   "wakeonbutton.toast.error_title": "WakeOnButton",
-  "wakeonbutton.toast.error": "Échec du réveil : %s",
+  "wakeonbutton.toast.start_requested": "Démarrage du serveur lancé...",
+  "wakeonbutton.toast.online": "Serveur en ligne !",
+  "wakeonbutton.toast.already_online": "Le serveur est déjà en ligne.",
   "wakeonbutton.toast.config_missing": "Configuration incomplète : vérifiez config/wakeonbutton.json",
-  "wakeonbutton.toast.first_run_setup": "Première configuration nécessaire : config/wakeonbutton.json",
-  "wakeonbutton.toast.token_decrypt_failed": "Jeton GitHub absent ou indéchiffrable"
+  "wakeonbutton.toast.credentials_missing": "Identifiants MineStrator absents ou indéchiffrables",
+  "wakeonbutton.toast.key_failed": "Clé locale illisible : vérifiez config/wakeonbutton.key",
+  "wakeonbutton.toast.error": "Échec : %s"
 }

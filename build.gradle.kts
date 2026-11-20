@@ -35,11 +35,8 @@ val shade: Configuration by configurations.creating
 dependencies {
     // Guava est fournie par NeoForge (version verrouillee par Minecraft) : pas de BOM ici.
     implementation("com.google.code.gson:gson:2.10.1")
-    // Code du generateur de paquets de reveil (sous-projet).
-    implementation(project(":wake-packet"))
     // Seules ces dependances sont incluses dans le jar shadow (pas le runtime NeoForge).
     shade("com.google.code.gson:gson:2.10.1")
-    shade(project(":wake-packet"))
 }
 
 tasks.shadowJar {

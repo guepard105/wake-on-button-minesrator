@@ -1,8 +1,9 @@
 package com.minestrator.wakeonbutton.client;
 
 import com.minestrator.wakeonbutton.config.ConfigManager;
-import com.minestrator.wakeonbutton.network.GitHubClient;
-import com.minestrator.wakeonbutton.wol.WakePacketSender;
+import com.minestrator.wakeonbutton.network.MineStratorClient;
+import com.minestrator.wakeonbutton.network.MineStratorClient.MineStratorException;
+import com.minestrator.wakeonbutton.network.MineStratorClient.PowerAction;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.events.GuiEventListener;
@@ -25,11 +26,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutionException;
 
 /**
  * Intégration du bouton « Allumer le serveur » dans les écrans vanilla.
@@ -43,9 +40,9 @@ import java.util.concurrent.ExecutionException;
  * <p>Chaque affichage est conditionné par la configuration
  * ({@code ui.show_in_pause_menu} / {@code ui.show_in_title_screen}).</p>
  *
- * <p>Le flow de réveil (dispatch GitHub Actions, attente de l'artifact, envoi du
- * magic packet) s'exécute entièrement en arrière-plan : le thread du jeu n'est
- * jamais bloqué et aucune modal n'est ouverte.</p>
+ * <p>Le flow de démarrage (connexion à l'API MineStrator, action de puissance,
+ * attente de la mise en ligne) s'exécute entièrement en arrière-plan : le thread
+ * du jeu n'est jamais bloqué et aucune modal n'est ouverte.</p>
  */
 public final class GuiHandler {
 
@@ -55,15 +52,13 @@ public final class GuiHandler {
     /** Fichier de diagnostic, à la racine du répertoire de jeu. */
     private static final Path LOG_FILE = FMLPaths.GAMEDIR.get().resolve("wakeonbutton.log");
 
-    /** Client GitHub partagé : sans état, thread-safe. */
-    private static final GitHubClient GITHUB = new GitHubClient();
+    /** Client MineStrator partagé : sans état, thread-safe. */
+    private static final MineStratorClient MINESTRATOR = new MineStratorClient();
 
-    /** Nom de l'artifact publié par le workflow. */
-    private static final String ARTIFACT_NAME = "wake-packet";
-    /** Attente maximale de l'artifact (le workflow doit se terminer). */
-    private static final Duration ARTIFACT_MAX_WAIT = Duration.ofSeconds(180);
-    /** Intervalle de polling de l'artifact. */
-    private static final Duration ARTIFACT_POLL_INTERVAL = Duration.ofSeconds(2);
+    /** Attente maximale de la mise en ligne (le démarrage se poursuit après). */
+    private static final Duration ONLINE_MAX_WAIT = Duration.ofSeconds(180);
+    /** Intervalle de polling de l'état du serveur. */
+    private static final long POLL_INTERVAL_MS = 4_000L;
 
     /** Marge entre deux éléments vanilla. */
     private static final int PADDING = 4;
@@ -198,106 +193,138 @@ public final class GuiHandler {
     }
 
     // ------------------------------------------------------------------
-    // Flow de réveil (entièrement asynchrone)
+    // Flow de démarrage (entièrement asynchrone)
     // ------------------------------------------------------------------
 
     /**
-     * Lance le flow de réveil sans jamais bloquer le thread client.
+     * Lance le démarrage du serveur sans jamais bloquer le thread client.
      *
-     * <p>Enchaînement : configuration → jeton → dispatch du workflow → attente de
-     * l'artifact → envoi du magic packet → notification.</p>
+     * <p>Enchaînement : identifiants déchiffrés → clé API (cache ou connexion)
+     * → état courant → action {@code start} → attente de la mise en ligne.</p>
      *
      * @param button bouton à remettre en état normal à la fin du flow
      */
     static void startWakeFlow(WakeButton button) {
         ConfigManager config = ConfigManager.getInstance();
-        String mac = config.getTargetMac();
-        String owner = config.getGithubOwner();
-        String repo = config.getGithubRepo();
-        String workflowId = config.getGithubWorkflowId();
-
-        // 1. Configuration minimale présente ?
-        if (isBlank(mac) || isBlank(owner) || isBlank(repo) || isBlank(workflowId)) {
-            log("configuration incomplète : MAC, dépôt ou workflow manquant");
+        String serverId = config.getServerId();
+        if (isBlank(serverId)) {
+            log("configuration incomplète : server_id manquant");
             toastError(Component.translatable("wakeonbutton.toast.config_missing"));
             return;
         }
 
-        // 2. Bouton désactivé et libellé « En cours... » jusqu'à la fin du flow.
         button.setWaking(true);
-        log("réveil demandé (mac=" + mac + ", dépôt=" + owner + "/" + repo
-                + ", workflow=" + workflowId + ")");
+        log("démarrage demandé (serveur " + serverId + ")");
 
-        // 3 à 8. Jeton (hors thread client), dispatch, artifact puis magic packet.
-        fetchToken(config)
-                .thenCompose(token -> GITHUB
-                        .dispatchWorkflow(owner, repo, workflowId,
-                                buildInputs(mac, config.getPasswordHex()), token)
-                        .thenCompose(runId -> {
-                            log("workflow dispatché (run " + runId + ") : attente de l'artifact");
-                            return GITHUB.waitForArtifact(owner, repo, runId, ARTIFACT_NAME, token,
-                                    ARTIFACT_MAX_WAIT, ARTIFACT_POLL_INTERVAL);
-                        }))
-                .thenCompose(packet -> {
-                    log("artifact reçu (" + packet.length + " octets) : envoi du magic packet");
-                    return WakePacketSender.sendMagicPacket(packet);
-                })
-                // 9 et 10. Retour sur le thread client : notification puis réactivation.
-                .whenComplete((ignored, error) -> Minecraft.getInstance().execute(() -> {
-                    button.setWaking(false);
-                    if (error == null) {
-                        log("magic packet envoyé : serveur réveillé");
-                        toastSuccess();
-                    } else {
-                        reportError(error);
-                    }
-                }));
-    }
-
-    /**
-     * Déchiffre le jeton GitHub hors du thread client (PBKDF2 + AES-GCM sont
-     * coûteux et doivent rester en arrière-plan).
-     */
-    private static CompletableFuture<String> fetchToken(ConfigManager config) {
-        return CompletableFuture.supplyAsync(() -> {
-            // Premier lancement : la clé maître est créée puis renvoyée.
-            char[] masterKey = config.loadOrCreateMasterKey();
-            if (masterKey == null) {
-                throw new WakeFlowException("wakeonbutton.toast.first_run_setup");
-            }
+        CompletableFuture.runAsync(() -> {
+            char[] masterKey = null;
             try {
-                String token = config.getGitHubToken(masterKey);
-                if (isBlank(token)) {
-                    throw new WakeFlowException("wakeonbutton.toast.token_decrypt_failed");
+                masterKey = config.loadOrCreateMasterKey();
+                if (masterKey == null) {
+                    throw new WakeFlowException("wakeonbutton.toast.key_failed");
                 }
-                return token;
+                ConfigManager.Credentials credentials = config.getCredentials(masterKey);
+                if (credentials == null) {
+                    throw new WakeFlowException("wakeonbutton.toast.credentials_missing");
+                }
+
+                String apiKey = config.getApiKey(masterKey);
+                MineStratorClient.ServerStatus status = null;
+                if (apiKey != null) {
+                    try {
+                        status = MINESTRATOR.fetchStatus(apiKey, serverId);
+                    } catch (MineStratorException e) {
+                        if (!e.isUnauthorized()) {
+                            throw e;
+                        }
+                        log("clé API expirée : reconnexion");
+                        apiKey = null;
+                    }
+                }
+                if (apiKey == null) {
+                    apiKey = MINESTRATOR.login(credentials.username(), credentials.password());
+                    config.setApiKey(apiKey, masterKey);
+                    log("connexion MineStrator réussie : clé API renouvelée");
+                    status = MINESTRATOR.fetchStatus(apiKey, serverId);
+                }
+
+                if (status != null && status.isRunning()) {
+                    log("serveur déjà en ligne : aucune action");
+                    ui(() -> {
+                        button.setWaking(false);
+                        toast(Component.translatable("wakeonbutton.toast.already_online"));
+                    });
+                    return;
+                }
+
+                MINESTRATOR.powerAction(apiKey, serverId, PowerAction.START);
+                log("action start acceptée par MineStrator");
+                ui(() -> {
+                    button.setWaking(false);
+                    toast(Component.translatable("wakeonbutton.toast.start_requested"));
+                });
+
+                if (awaitOnline(apiKey, serverId)) {
+                    log("serveur en ligne");
+                    ui(() -> toast(Component.translatable("wakeonbutton.toast.online")));
+                } else {
+                    log("serveur toujours en démarrage après " + ONLINE_MAX_WAIT.toSeconds() + " s");
+                }
+            } catch (Throwable error) {
+                ui(() -> {
+                    button.setWaking(false);
+                    reportError(error);
+                });
             } finally {
-                // La clé ne doit pas rester en mémoire plus longtemps que nécessaire.
-                Arrays.fill(masterKey, '\0');
+                if (masterKey != null) {
+                    Arrays.fill(masterKey, '\0');
+                }
+                ui(() -> button.setWaking(false));
             }
         });
     }
 
-    /** Inputs du workflow : MAC obligatoire, mot de passe SecureOn optionnel. */
-    private static Map<String, String> buildInputs(String mac, String passwordHex) {
-        Map<String, String> inputs = new LinkedHashMap<>(2);
-        inputs.put("target_mac", mac);
-        if (!isBlank(passwordHex)) {
-            inputs.put("password", passwordHex);
+    /**
+     * Attend la mise en ligne du serveur (polling borné). Une clé API expirée
+     * ou une erreur réseau interrompt l'attente : le démarrage continue côté
+     * MineStrator et l'utilisateur sera fixé en ouvrant le panel.
+     */
+    private static boolean awaitOnline(String apiKey, String serverId) {
+        long deadline = System.nanoTime() + ONLINE_MAX_WAIT.toNanos();
+        while (System.nanoTime() < deadline) {
+            sleep(POLL_INTERVAL_MS);
+            try {
+                if (MINESTRATOR.fetchStatus(apiKey, serverId).isRunning()) {
+                    return true;
+                }
+            } catch (MineStratorException e) {
+                log("polling de l'état impossible : " + e.getMessage());
+                if (e.isUnauthorized()) {
+                    return false;
+                }
+            }
         }
-        return inputs;
+        return false;
     }
 
     // ------------------------------------------------------------------
     // Notifications et diagnostic
     // ------------------------------------------------------------------
 
-    /** Toast de succès. */
-    private static void toastSuccess() {
+    /** Exécute une action sur le thread client (obligatoire pour l'UI). */
+    private static void ui(Runnable action) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft != null) {
+            minecraft.execute(action);
+        }
+    }
+
+    /** Toast d'information (titre commun). */
+    private static void toast(Component message) {
         SystemToast.add(Minecraft.getInstance().getToasts(),
                 SystemToast.SystemToastId.PERIODIC_NOTIFICATION,
                 Component.translatable("wakeonbutton.toast.success_title"),
-                Component.translatable("wakeonbutton.toast.success"));
+                message);
     }
 
     /** Toast d'erreur (message déjà localisé). */
@@ -312,7 +339,7 @@ public final class GuiHandler {
     private static void reportError(Throwable error) {
         Throwable cause = unwrap(error);
         String detail = describe(cause);
-        log("échec du réveil : " + detail);
+        log("échec du démarrage : " + detail);
         if (cause instanceof WakeFlowException flowError) {
             // Erreur de configuration connue : message dédié.
             toastError(Component.translatable(flowError.translationKey()));
@@ -324,7 +351,8 @@ public final class GuiHandler {
     /** Déballe l'emballage des futures (CompletionException / ExecutionException). */
     private static Throwable unwrap(Throwable error) {
         Throwable current = error;
-        while ((current instanceof CompletionException || current instanceof ExecutionException)
+        while ((current instanceof java.util.concurrent.CompletionException
+                || current instanceof java.util.concurrent.ExecutionException)
                 && current.getCause() != null) {
             current = current.getCause();
         }
@@ -340,6 +368,15 @@ public final class GuiHandler {
     /** Vrai si la chaîne est absente ou blanche. */
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    /** Pause sans propager l'interruption (le flow est jetable). */
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**

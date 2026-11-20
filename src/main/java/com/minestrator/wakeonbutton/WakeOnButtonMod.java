@@ -13,7 +13,7 @@ import net.neoforged.neoforge.common.NeoForge;
  *
  * Le mod est purement cote client (side="CLIENT" dans neoforge.mods.toml).
  * Il initialise le gestionnaire de configuration et enregistre le handler
- * d'injection GUI pour ajouter le bouton "Reveiller le serveur" dans l'ecran
+ * d'injection GUI pour ajouter le bouton "Allumer le serveur" dans l'ecran
  * pause (in-game) et/ou l'ecran titre selon la configuration.
  */
 @Mod(WakeOnButtonMod.MODID)

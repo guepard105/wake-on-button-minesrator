@@ -8,8 +8,8 @@ import net.minecraft.network.chat.Component;
  *
  * <p>Le bouton ne fait que déclencher le flow asynchrone de {@link GuiHandler} :
  * aucun traitement réseau ou cryptographique n'a lieu ici. Pendant l'exécution,
- * son libellé passe à « En cours... » et il est désactivé ; il revient à son
- * état normal une fois le flow terminé (succès ou erreur).</p>
+ * son libellé passe à « Démarrage... » et il est désactivé ; il revient à son
+ * état normal une fois la demande envoyée (succès ou erreur).</p>
  */
 public class WakeButton extends Button {
 

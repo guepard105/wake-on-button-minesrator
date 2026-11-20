@@ -30,16 +30,16 @@ import net.neoforged.fml.loading.FMLPaths;
  * <p>Deux fichiers sont manipulés dans GAMEDIR (répertoire de jeu, exposé par
  * la propriété système {@code user.dir} quand Minecraft est lancé) :</p>
  * <ul>
- *     <li>{@code config/wakeonbutton.json} : configuration (jeton GitHub chiffré,
- *     adresse MAC cible, mot de passe WoL, préférences d'interface) ;</li>
+ *     <li>{@code config/wakeonbutton.json} : configuration (identifiants
+ *     MineStrator chiffrés, clé API chiffrée, préférences d'interface) ;</li>
  *     <li>{@code config/wakeonbutton.key} : clé maître locale générée au premier
  *     lancement (Option B : PBKDF2 sur une graine aléatoire + entropie système).
- *     Ce fichier ne contient jamais le jeton en clair.</li>
+ *     Ce fichier ne contient jamais les identifiants en clair.</li>
  * </ul>
  *
- * <p>Le jeton GitHub est chiffré en AES-256-GCM ; la clé de chiffrement est
- * dérivée du mot de passe maître par PBKDF2WithHmacSHA256 avec un sel aléatoire
- * stocké dans le fichier, au format
+ * <p>Les identifiants et la clé API sont chiffrés en AES-256-GCM ; la clé de
+ * chiffrement est dérivée du mot de passe maître par PBKDF2WithHmacSHA256 avec
+ * un sel aléatoire stocké dans le fichier, au format
  * {@code Base64(salt(16) || iv(12) || ciphertext || tag(16))}.</p>
  *
  * <p>Aucune dépendance externe : uniquement le JDK 21 (javax.crypto).</p>
@@ -58,8 +58,8 @@ public final class ConfigManager {
     /** Taille de la clé AES en bits. */
     private static final int AES_KEY_BITS = 256;
 
-    /** Nombre d'itérations par défaut pour la dérivation de la clé du jeton. */
-    private static final int DEFAULT_TOKEN_KDF_ITERATIONS = 100_000;
+    /** Nombre d'itérations par défaut pour la dérivation de la clé des secrets. */
+    private static final int DEFAULT_KDF_ITERATIONS = 100_000;
     /** Nombre d'itérations pour la dérivation de la clé maître (fichier .key). */
     private static final int KEY_FILE_KDF_ITERATIONS = 100_000;
     /** Taille de la graine aléatoire stockée dans le fichier .key. */
@@ -83,18 +83,20 @@ public final class ConfigManager {
 
     // --- État en mémoire (protégé par rwLock) ---
 
-    private String githubOwner = "guepard105";
-    private String githubRepo = "wake-on-button-minesrator";
-    private String githubWorkflowId = "build-wake-packet.yml";
-    /** Jeton chiffré au format Base64(salt|iv|ciphertext|tag), ou null si absent. */
-    private String tokenEncrypted = null;
-    private int tokenKdfIterations = DEFAULT_TOKEN_KDF_ITERATIONS;
-    /** Jeton en clair lu dans le fichier (bootstrap), en attente de chiffrement. */
-    private String pendingPlainToken = null;
-    private String targetMac = "";
-    private String passwordHex = "";
+    private String serverId = "511952";
+    /** Valeurs chiffrées au format Base64(salt|iv|ciphertext|tag). */
+    private String usernameEncrypted = null;
+    private String passwordEncrypted = null;
+    private String apiKeyEncrypted = null;
+    private int kdfIterations = DEFAULT_KDF_ITERATIONS;
+    /** Bootstrap : identifiants en clair lus dans le fichier, en attente de chiffrement. */
+    private String pendingPlainUsername = null;
+    private String pendingPlainPassword = null;
     private boolean showInPauseMenu = true;
-    private boolean showInTitleScreen = false;
+    private boolean showInTitleScreen = true;
+
+    /** Identifiants MineStrator en clair (RAM uniquement). */
+    public record Credentials(String username, String password, String serverId) {}
 
     /**
      * Résout le répertoire de jeu : FMLPaths.GAMEDIR sous NeoForge (cas normal
@@ -145,24 +147,22 @@ public final class ConfigManager {
                 return;
             }
 
-            Map<?, ?> github = asMap(root.get("github"));
-            if (github != null) {
-                githubOwner = asString(github.get("owner"), githubOwner);
-                githubRepo = asString(github.get("repo"), githubRepo);
-                githubWorkflowId = asString(github.get("workflow_id"), githubWorkflowId);
-                tokenEncrypted = asString(github.get("token_encrypted"), tokenEncrypted);
-                tokenKdfIterations = asInt(github.get("token_kdf_iterations"), tokenKdfIterations);
-                // Bootstrap : jeton eventuellement fourni en clair par le pack.
-                String plain = asString(github.get("token"), null);
-                if (plain != null && !plain.isBlank()) {
-                    pendingPlainToken = plain;
+            Map<?, ?> minestrator = asMap(root.get("minestrator"));
+            if (minestrator != null) {
+                serverId = asString(minestrator.get("server_id"), serverId);
+                usernameEncrypted = asString(minestrator.get("username_encrypted"), usernameEncrypted);
+                passwordEncrypted = asString(minestrator.get("password_encrypted"), passwordEncrypted);
+                apiKeyEncrypted = asString(minestrator.get("api_key_encrypted"), apiKeyEncrypted);
+                kdfIterations = asInt(minestrator.get("kdf_iterations"), kdfIterations);
+                // Bootstrap : identifiants éventuellement fournis en clair par le pack.
+                String plainUser = asString(minestrator.get("username"), null);
+                if (plainUser != null && !plainUser.isBlank()) {
+                    pendingPlainUsername = plainUser;
                 }
-            }
-
-            Map<?, ?> server = asMap(root.get("server"));
-            if (server != null) {
-                targetMac = asString(server.get("target_mac"), targetMac);
-                passwordHex = asString(server.get("password_hex"), passwordHex);
+                String plainPass = asString(minestrator.get("password"), null);
+                if (plainPass != null && !plainPass.isBlank()) {
+                    pendingPlainPassword = plainPass;
+                }
             }
 
             Map<?, ?> ui = asMap(root.get("ui"));
@@ -341,7 +341,8 @@ public final class ConfigManager {
     // ------------------------------------------------------------------
 
     /**
-     * Chiffre un texte (le jeton GitHub) avec la clé dérivée du mot de passe maître.
+     * Chiffre un texte (identifiant, mot de passe, clé API) avec la clé dérivée
+     * du mot de passe maître.
      *
      * @return la chaîne {@code Base64(salt(16) || iv(12) || ciphertext || tag(16))},
      *         ou {@code null} en cas d'échec ou de mot de passe vide.
@@ -358,7 +359,7 @@ public final class ConfigManager {
             int iterations;
             rwLock.readLock().lock();
             try {
-                iterations = tokenKdfIterations > 0 ? tokenKdfIterations : DEFAULT_TOKEN_KDF_ITERATIONS;
+                iterations = kdfIterations > 0 ? kdfIterations : DEFAULT_KDF_ITERATIONS;
             } finally {
                 rwLock.readLock().unlock();
             }
@@ -409,7 +410,7 @@ public final class ConfigManager {
             int iterations;
             rwLock.readLock().lock();
             try {
-                iterations = tokenKdfIterations > 0 ? tokenKdfIterations : DEFAULT_TOKEN_KDF_ITERATIONS;
+                iterations = kdfIterations > 0 ? kdfIterations : DEFAULT_KDF_ITERATIONS;
             } finally {
                 rwLock.readLock().unlock();
             }
@@ -459,173 +460,189 @@ public final class ConfigManager {
     // ------------------------------------------------------------------
 
     /**
-     * Renvoie le jeton GitHub en clair, ou {@code null} s'il est absent ou
-     * indéchiffrable.
+     * Renvoie les identifiants, ou {@code null} s'ils sont absents ou
+     * indéchiffrables.
      *
-     * <p>Si la configuration chargée contenait un jeton en clair (bootstrap du
-     * pack), il est chiffré et réécrit sur disque au premier appel.</p>
+     * <p>Si un bootstrap en clair est en attente (fourni par le pack), il est
+     * d'abord chiffré puis effacé.</p>
      */
-    public String getGitHubToken(char[] masterKey) {
-        String encrypted = readEncryptedToken();
-        if (encrypted == null || encrypted.isEmpty()) {
-            if (migratePlainToken()) {
-                encrypted = readEncryptedToken();
-            }
-        }
-        if (encrypted == null || encrypted.isEmpty()) {
-            return null;
-        }
-        return decryptToken(encrypted, masterKey);
-    }
-
-    /** Lecture verrouillée du jeton chiffré courant. */
-    private String readEncryptedToken() {
+    public Credentials getCredentials(char[] masterKey) {
+        String userEnc;
+        String passEnc;
+        boolean pending;
         rwLock.readLock().lock();
         try {
-            return tokenEncrypted;
+            userEnc = usernameEncrypted;
+            passEnc = passwordEncrypted;
+            pending = pendingPlainUsername != null || pendingPlainPassword != null;
+        } finally {
+            rwLock.readLock().unlock();
+        }
+        if (isEmpty(userEnc) && isEmpty(passEnc) && pending) {
+            if (migratePlainCredentials()) {
+                rwLock.readLock().lock();
+                try {
+                    userEnc = usernameEncrypted;
+                    passEnc = passwordEncrypted;
+                } finally {
+                    rwLock.readLock().unlock();
+                }
+            }
+        }
+        if (isEmpty(userEnc) || isEmpty(passEnc)) {
+            return null;
+        }
+        String user = decryptToken(userEnc, masterKey);
+        String pass = decryptToken(passEnc, masterKey);
+        if (isEmpty(user) || isEmpty(pass)) {
+            return null;
+        }
+        rwLock.readLock().lock();
+        try {
+            return new Credentials(user, pass, serverId);
         } finally {
             rwLock.readLock().unlock();
         }
     }
 
     /**
-     * Chiffre le jeton en clair éventuellement fourni par le pack, l'écrit dans
-     * la configuration puis l'efface de la mémoire.
+     * Chiffre les éventuels identifiants bootstrap en clair, les réécrit et les
+     * efface de la mémoire.
      *
      * @return {@code true} si une migration a eu lieu
      */
-    public boolean migratePlainToken() {
-        String plain;
+    public boolean migratePlainCredentials() {
+        String plainUser;
+        String plainPass;
         rwLock.writeLock().lock();
         try {
-            plain = pendingPlainToken;
-            pendingPlainToken = null;
+            plainUser = pendingPlainUsername;
+            plainPass = pendingPlainPassword;
+            pendingPlainUsername = null;
+            pendingPlainPassword = null;
         } finally {
             rwLock.writeLock().unlock();
         }
-        if (plain == null || plain.isBlank()) {
+        if (isEmpty(plainUser) && isEmpty(plainPass)) {
             return false;
         }
         char[] key = loadOrCreateMasterKey();
         if (key == null) {
-            log("migration du jeton impossible : cle maitre indisponible");
+            log("migration des identifiants impossible : cle maitre indisponible");
             return false;
         }
         try {
-            String encrypted = encryptToken(plain, key);
-            if (encrypted == null) {
+            String userEnc = isEmpty(plainUser) ? null : encryptToken(plainUser, key);
+            String passEnc = isEmpty(plainPass) ? null : encryptToken(plainPass, key);
+            if (userEnc == null && passEnc == null) {
                 return false;
             }
             rwLock.writeLock().lock();
             try {
-                tokenEncrypted = encrypted;
+                if (userEnc != null) {
+                    usernameEncrypted = userEnc;
+                }
+                if (passEnc != null) {
+                    passwordEncrypted = passEnc;
+                }
             } finally {
                 rwLock.writeLock().unlock();
             }
             save();
-            log("jeton GitHub en clair migre vers la forme chiffree");
+            log("identifiants MineStrator en clair migres vers la forme chiffree");
             return true;
         } finally {
             java.util.Arrays.fill(key, '\0');
         }
     }
 
-    /** Chiffre puis mémorise le jeton GitHub (appeler {@link #save()} ensuite). */
-    public void setGitHubToken(String token, char[] masterKey) {
-        String encrypted = (token == null || token.isEmpty()) ? null : encryptToken(token, masterKey);
-        rwLock.writeLock().lock();
+    /** Clé API MineStrator en cache, ou {@code null} si absente/indéchiffrable. */
+    public String getApiKey(char[] masterKey) {
+        String encrypted;
+        rwLock.readLock().lock();
         try {
-            tokenEncrypted = encrypted;
+            encrypted = apiKeyEncrypted;
         } finally {
-            rwLock.writeLock().unlock();
+            rwLock.readLock().unlock();
+        }
+        if (isEmpty(encrypted)) {
+            return null;
+        }
+        String apiKey = decryptToken(encrypted, masterKey);
+        return isEmpty(apiKey) ? null : apiKey;
+    }
+
+    /** Chiffre et mémorise la clé API, puis sauvegarde. */
+    public void setApiKey(String apiKey, char[] masterKey) {
+        char[] key = masterKey;
+        boolean localKey = false;
+        if (key == null) {
+            key = loadOrCreateMasterKey();
+            localKey = true;
+        }
+        if (key == null) {
+            log("enregistrement de la cle API impossible : cle maitre indisponible");
+            return;
+        }
+        try {
+            String encrypted = isEmpty(apiKey) ? null : encryptToken(apiKey, key);
+            rwLock.writeLock().lock();
+            try {
+                apiKeyEncrypted = encrypted;
+            } finally {
+                rwLock.writeLock().unlock();
+            }
+            save();
+        } finally {
+            if (localKey) {
+                java.util.Arrays.fill(key, '\0');
+            }
         }
     }
 
-    public String getTargetMac() {
+    /** Chiffre et mémorise un couple identifiant/mot de passe, puis sauvegarde. */
+    public void setCredentials(String username, String password, char[] masterKey) {
+        char[] key = masterKey;
+        boolean localKey = false;
+        if (key == null) {
+            key = loadOrCreateMasterKey();
+            localKey = true;
+        }
+        if (key == null) {
+            log("enregistrement des identifiants impossible : cle maitre indisponible");
+            return;
+        }
+        try {
+            String userEnc = isEmpty(username) ? null : encryptToken(username, key);
+            String passEnc = isEmpty(password) ? null : encryptToken(password, key);
+            rwLock.writeLock().lock();
+            try {
+                usernameEncrypted = userEnc;
+                passwordEncrypted = passEnc;
+            } finally {
+                rwLock.writeLock().unlock();
+            }
+            save();
+        } finally {
+            if (localKey) {
+                java.util.Arrays.fill(key, '\0');
+            }
+        }
+    }
+
+    public String getServerId() {
         rwLock.readLock().lock();
         try {
-            return targetMac;
+            return serverId;
         } finally {
             rwLock.readLock().unlock();
         }
     }
 
-    public void setTargetMac(String mac) {
+    public void setServerId(String serverId) {
         rwLock.writeLock().lock();
         try {
-            targetMac = mac == null ? "" : mac.trim();
-        } finally {
-            rwLock.writeLock().unlock();
-        }
-    }
-
-    public String getPasswordHex() {
-        rwLock.readLock().lock();
-        try {
-            return passwordHex;
-        } finally {
-            rwLock.readLock().unlock();
-        }
-    }
-
-    public void setPasswordHex(String hex) {
-        rwLock.writeLock().lock();
-        try {
-            passwordHex = hex == null ? "" : hex.trim();
-        } finally {
-            rwLock.writeLock().unlock();
-        }
-    }
-
-    public String getGithubOwner() {
-        rwLock.readLock().lock();
-        try {
-            return githubOwner;
-        } finally {
-            rwLock.readLock().unlock();
-        }
-    }
-
-    public void setGithubOwner(String owner) {
-        rwLock.writeLock().lock();
-        try {
-            githubOwner = owner == null ? "" : owner.trim();
-        } finally {
-            rwLock.writeLock().unlock();
-        }
-    }
-
-    public String getGithubRepo() {
-        rwLock.readLock().lock();
-        try {
-            return githubRepo;
-        } finally {
-            rwLock.readLock().unlock();
-        }
-    }
-
-    public void setGithubRepo(String repo) {
-        rwLock.writeLock().lock();
-        try {
-            githubRepo = repo == null ? "" : repo.trim();
-        } finally {
-            rwLock.writeLock().unlock();
-        }
-    }
-
-    public String getGithubWorkflowId() {
-        rwLock.readLock().lock();
-        try {
-            return githubWorkflowId;
-        } finally {
-            rwLock.readLock().unlock();
-        }
-    }
-
-    public void setGithubWorkflowId(String workflowId) {
-        rwLock.writeLock().lock();
-        try {
-            githubWorkflowId = workflowId == null ? "" : workflowId.trim();
+            this.serverId = serverId == null ? "" : serverId.trim();
         } finally {
             rwLock.writeLock().unlock();
         }
@@ -681,22 +698,27 @@ public final class ConfigManager {
     // Sérialisation JSON (JDK pur, schéma fixe)
     // ------------------------------------------------------------------
 
-    /** Construit la représentation JSON de l'état courant (ordre stable). */
+    /**
+     * Construit la représentation JSON de l'état courant (ordre stable).
+     * Les champs en clair {@code username}/{@code password} ne sont jamais écrits.
+     */
     private String toJson() {
         rwLock.readLock().lock();
         try {
             StringBuilder sb = new StringBuilder(512);
             sb.append("{\n");
-            sb.append("  \"github\": {\n");
-            sb.append("    \"owner\": ").append(quote(githubOwner)).append(",\n");
-            sb.append("    \"repo\": ").append(quote(githubRepo)).append(",\n");
-            sb.append("    \"workflow_id\": ").append(quote(githubWorkflowId)).append(",\n");
-            sb.append("    \"token_encrypted\": ").append(quote(tokenEncrypted)).append(",\n");
-            sb.append("    \"token_kdf_iterations\": ").append(tokenKdfIterations).append("\n");
-            sb.append("  },\n");
-            sb.append("  \"server\": {\n");
-            sb.append("    \"target_mac\": ").append(quote(targetMac)).append(",\n");
-            sb.append("    \"password_hex\": ").append(quote(passwordHex)).append("\n");
+            sb.append("  \"minestrator\": {\n");
+            sb.append("    \"server_id\": ").append(quote(serverId)).append(",\n");
+            if (usernameEncrypted != null) {
+                sb.append("    \"username_encrypted\": ").append(quote(usernameEncrypted)).append(",\n");
+            }
+            if (passwordEncrypted != null) {
+                sb.append("    \"password_encrypted\": ").append(quote(passwordEncrypted)).append(",\n");
+            }
+            if (apiKeyEncrypted != null) {
+                sb.append("    \"api_key_encrypted\": ").append(quote(apiKeyEncrypted)).append(",\n");
+            }
+            sb.append("    \"kdf_iterations\": ").append(kdfIterations).append("\n");
             sb.append("  },\n");
             sb.append("  \"ui\": {\n");
             sb.append("    \"show_in_pause_menu\": ").append(showInPauseMenu).append(",\n");
@@ -929,6 +951,11 @@ public final class ConfigManager {
 
     private static boolean asBoolean(Object value, boolean fallback) {
         return (value instanceof Boolean b) ? b : fallback;
+    }
+
+    /** Indique si une chaîne est nulle ou vide. */
+    private static boolean isEmpty(String value) {
+        return value == null || value.isEmpty();
     }
 
     /** Convertit des octets en chaîne hexadécimale minuscule. */

@@ -1,11 +1,13 @@
 {
-  "wakeonbutton.gui.start_server": "Wake server",
-  "wakeonbutton.gui.waking": "Waking...",
+  "wakeonbutton.gui.start_server": "Start server",
+  "wakeonbutton.gui.waking": "Starting...",
   "wakeonbutton.toast.success_title": "WakeOnButton",
-  "wakeonbutton.toast.success": "Wake packet sent!",
   "wakeonbutton.toast.error_title": "WakeOnButton",
-  "wakeonbutton.toast.error": "Wake failed: %s",
+  "wakeonbutton.toast.start_requested": "Server start requested...",
+  "wakeonbutton.toast.online": "Server is online!",
+  "wakeonbutton.toast.already_online": "Server is already online.",
   "wakeonbutton.toast.config_missing": "Incomplete configuration: check config/wakeonbutton.json",
-  "wakeonbutton.toast.first_run_setup": "First-time setup required: config/wakeonbutton.json",
-  "wakeonbutton.toast.token_decrypt_failed": "GitHub token missing or undecryptable"
+  "wakeonbutton.toast.credentials_missing": "MineStrator credentials missing or undecryptable",
+  "wakeonbutton.toast.key_failed": "Local key unreadable: check config/wakeonbutton.key",
+  "wakeonbutton.toast.error": "Failed: %s"
 }
